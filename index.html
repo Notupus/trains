@@ -122,6 +122,14 @@
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 
     <script>
+        let latestLiveData = [];      // Current SSE positions
+let latestTrackerData = [];   // Snapshot from the Python DB
+let currentSidebarView = 'live'; // Default dropdown state
+let isWaybackMode = false;    // Toggle for DVR
+let waybackTargetTime = 0;    // The "Time Travel" timestamp
+let currentArchiveData = {};  // The full-day dataset for DVR
+const trainMarkers = {};      // Leaflet marker objects (keyed by ID)
+const stationMarkers = [];    // Array of circle markers for scaling
         // THEME LOGIC
         function initTheme() {
             const savedTheme = localStorage.getItem('theme');
