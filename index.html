@@ -483,17 +483,14 @@
         // Lightweight Live Poller
         function fetchTrackerData() {
             if (isWaybackMode) return; // Don't poll DB if watching DVR
-            fetch('/api/tracker')
-                .then(res => res.json())
-                .then(data => {
-                    latestTrackerData = data;
-                    if (currentSidebarView !== 'live') renderSidebar();
-
-                    latestTrackerData.forEach(t => {
-                        if (t.last_seen_sec > 30 && t.raw_data && t.lat && t.lng) {
-                            updateMapMarker(t.raw_data, 'ghost', t.last_seen_sec);
-                        }
-                    });
+fetch('/api/tracker')
+    .then(r => r.json())
+    .then(data => {
+        latestTrackerData = data; // Save to RAM
+        renderSidebar();          // Populate the list instantly
+        // Draw "Ghost" markers so the map isn't empty
+        data.forEach(t => updateMapMarker(t.raw_data || t, 'ghost', t.last_seen_sec));
+    });
                 }).catch(err => console.log("Tracker API offline."));
         }
         setInterval(fetchTrackerData, 3000);
