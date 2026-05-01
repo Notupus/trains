@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Train Map (Hellenic Railways)</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; height: 100vh; background-color: #f4f4f9; }
+        header { background-color: #004d99; color: white; padding: 15px 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); z-index: 1000; display: flex; justify-content: space-between; align-items: center; }
+        h1 { margin: 0; font-size: 20px; letter-spacing: 1px; }
+        .controls-container { display: flex; align-items: center; gap: 15px; }
+        .stats-bar { background-color: rgba(255, 255, 255, 0.2); padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: bold; }
+        #map { flex-grow: 1; width: 100vw; }
+
+        /* Popup General Styling */
+        .info-popup { font-size: 13px; line-height: 1.5; }
+        .info-popup b { color: #004d99; }
+        .info-popup hr { border: 0; border-top: 1px solid #ccc; margin: 8px 0; }
+
+        /* Station Board Styling */
+        .boards-wrapper { display: flex; gap: 15px; margin-top: 5px; margin-bottom: 10px; }
+        .board-col { flex: 1; min-width: 160px; }
+        .board-list { margin: 5px 0 0 0; padding: 5px 10px 5px 25px; background-color: #fff; border: 1px solid #ddd; border-radius: 4px; color: #333; max-height: 150px; overflow-y: auto; }
+        .board-list li { margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px dotted #ccc; }
+        .board-list li:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+        .arr-time { font-weight: bold; color: #d9534f; }
+        .dep-time { font-weight: bold; color: #28a745; }
+
+        .details-box { background-color: #eef2f5; border: 1px solid #d0d7de; border-radius: 4px; padding: 8px; font-size: 11px; color: #555; max-height: 120px; overflow-y: auto; margin-top: 10px; }
+        .details-box b { color: #333; }
+
+        .train-icon-container { background: transparent; border: none; }
+        .train-arrow { background-color: #d9534f; color: white; border: 2px solid white; border-radius: 50%; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.4); transition: transform 0.5s ease-out; font-size: 12px; }
+        .train-stats { width: 100%; border-collapse: collapse; margin-top: 5px; }
+        .train-stats td { padding: 3px 0; vertical-align: top; }
+        .train-stats td:first-child { width: 90px; }
+
+        /* Dashcam Button & Modal Styling */
+        .cam-btn { display: block; width: 100%; margin-top: 10px; padding: 8px; background-color: #d9534f; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; text-align: center; transition: background-color 0.2s; }
+        .cam-btn:hover { background-color: #c9302c; }
+
+        #video-modal { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background-color: rgba(0,0,0,0.8); z-index: 2000; }
+        .video-container { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80%; max-width: 800px; background: #000; border-radius: 8px; overflow: hidden; box-shadow: 0 5px 15px rgba(0,0,0,0.5); }
+        .video-header { background: #222; color: #fff; padding: 10px 15px; display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
+        .close-video { background: transparent; border: none; color: white; font-size: 20px; cursor: pointer; }
+        .close-video:hover { color: #d9534f; }
+        video { width: 100%; max-height: 70vh; outline: none; background-color: black; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Hellenic Railways Live</h1>
+        <div class="controls-container">
+            <div class="stats-bar">
+                🚂 Trains: <span id="train-count">0</span> | ⚡ MPS: <span id="mps-counter">0</span> | Status: <span id="stream-status">🟡 Connecting...</span>
+            </div>
+        </div>
+    </header>
+
+    <div id="map"></div>
+
+    <div id="video-modal">
+        <div class="video-container">
+            <div class="video-header">
+                <span id="video-title">Train Dashcam</span>
+                <button class="close-video" onclick="closeDashcam()">✖</button>
+            </div>
+            <video id="dashcam-player" controls autoplay></video>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+    <script>
+        const map = L.map('map').setView([39.0, 22.5], 7);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        map.createPane('stationsPane');
+        map.getPane('stationsPane').style.zIndex = 450;
+
+        // ==========================================
+        // DASHCAM LOGIC
+        // ==========================================
+        let hlsPlayer = null;
+
+        window.openDashcam = function(trainId, trainNum) {
+            const btn = document.getElementById(`cam-btn-${trainId}`);
+            btn.innerText = "⏳ Loading Stream...";
+
+            fetch(`/api/public/trains/${trainId}/stream`)
+                .then(res => res.json())
+                .then(data => {
+                    btn.innerText = "🎥 Live Dashcam";
+
+                    const streamUrl = data.hls?.playlistUrl;
+                    if (!streamUrl) {
+                        alert("No live camera stream available for this train right now.");
+                        return;
+                    }
+
+                    document.getElementById('video-title').innerText = `🚂 Live Dashcam: Train ${trainNum}`;
+                    document.getElementById('video-modal').style.display = 'block';
+                    const videoElement = document.getElementById('dashcam-player');
+
+                    if (Hls.isSupported()) {
+                        if (hlsPlayer) hlsPlayer.destroy();
+                        hlsPlayer = new Hls();
+                        hlsPlayer.loadSource(streamUrl);
+                        hlsPlayer.attachMedia(videoElement);
+                        hlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+                            videoElement.play();
+                        });
+                    }
+                    else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                        videoElement.src = streamUrl;
+                        videoElement.addEventListener('loadedmetadata', function() {
+                            videoElement.play();
+                        });
+                    }
+                })
+                .catch(err => {
+                    btn.innerText = "🎥 Live Dashcam";
+                    alert("Error reaching the stream server.");
+                });
+        };
+
+        window.closeDashcam = function() {
+            document.getElementById('video-modal').style.display = 'none';
+            const videoElement = document.getElementById('dashcam-player');
+            videoElement.pause();
+            if (hlsPlayer) {
+                hlsPlayer.destroy();
+                hlsPlayer = null;
+            }
+        };
+
+        // ==========================================
+        // INFRASTRUCTURE & BOARDS
+        // ==========================================
+        fetch('/geo')
+            .then(response => response.json())
+            .then(json => {
+                if(json && json.data) {
+                    L.geoJSON(json.data, {
+                        pointToLayer: function (feature, latlng) {
+                            return L.circleMarker(latlng, { pane: 'stationsPane', radius: 10, fillColor: "#ff7800", color: "#000", weight: 2, opacity: 1, fillOpacity: 1 });
+                        },
+                        style: function(feature) {
+                            if (feature.properties.entityType === 'tunnel') return { color: "#555", weight: 6, dashArray: "6, 6" };
+                            else if (feature.properties.entityType === 'track') return { color: "#3388ff", weight: 5, opacity: 0.7 };
+                        },
+                        onEachFeature: function (feature, layer) {
+                            const name = feature.properties.name || feature.properties.entityType.toUpperCase();
+
+                            // Safely handles both MongoDB Hex IDs and older OSM negative/numeric IDs
+                            const stationId = feature.properties._id || feature.properties.osm_id;
+
+                            let popupHtml = `<div class="info-popup"><b style="font-size: 16px;">🏢 ${name}</b><hr>`;
+
+                            // 1. Placeholder for Live Boards
+                            popupHtml += `<div id="board-${stationId}"></div>`;
+
+                            // 2. The Infrastructure Details Box (Restored)
+                            popupHtml += `<div class="details-box"><b>Infrastructure Details:</b><br>`;
+                            for (const [key, value] of Object.entries(feature.properties)) {
+                                popupHtml += `<b>${key}:</b> ${value}<br>`;
+                            }
+                            popupHtml += `</div></div>`;
+
+                            layer.bindPopup(popupHtml, { maxHeight: 450, minWidth: 420 });
+
+                            layer.on('popupopen', function() {
+                                if (feature.properties.entityType === 'station' && stationId) {
+                                    const container = document.getElementById(`board-${stationId}`);
+                                    if (!container) return;
+
+                                    container.innerHTML = '<i>Fetching live boards...</i><br><br>';
+
+                                    Promise.all([
+                                        fetch(`/arrivals/${stationId}`).then(res => res.json()),
+                                        fetch(`/departures/${stationId}`).then(res => res.json())
+                                    ])
+                                    .then(([arrData, depData]) => {
+                                        let boardHtml = '<div class="boards-wrapper">';
+
+                                        boardHtml += '<div class="board-col"><b>📥 ARRIVALS:</b><ul class="board-list">';
+                                        if (arrData && arrData.arrivals && arrData.arrivals.length > 0) {
+                                            arrData.arrivals.forEach(arr => {
+                                                const time = new Date(arr.scheduledTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                                boardHtml += `<li><span class="arr-time">${time}</span><br>Trn <b>${arr.trainNumber}</b> from ${arr.from}</li>`;
+                                            });
+                                        } else { boardHtml += '<li><i>No arrivals</i></li>'; }
+                                        boardHtml += '</ul></div>';
+
+                                        boardHtml += '<div class="board-col"><b>📤 DEPARTURES:</b><ul class="board-list">';
+                                        if (depData && depData.departures && depData.departures.length > 0) {
+                                            depData.departures.forEach(dep => {
+                                                const time = new Date(dep.scheduledTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                                                boardHtml += `<li><span class="dep-time">${time}</span><br>Trn <b>${dep.trainNumber}</b> to ${dep.to}</li>`;
+                                            });
+                                        } else { boardHtml += '<li><i>No departures</i></li>'; }
+                                        boardHtml += '</ul></div></div>';
+
+                                        container.innerHTML = boardHtml;
+                                    })
+                                    .catch(err => {
+                                        if (container) container.innerHTML = '<i>Error loading station boards.</i><br><br>';
+                                    });
+                                }
+                            });
+                        }
+                    }).addTo(map);
+                }
+            })
+            .catch(err => console.error("Error loading infrastructure GeoJSON:", err));
+
+        // ==========================================
+        // LIVE TRAIN SSE STREAM
+        // ==========================================
+        const trainMarkers = {};
+        const source = new EventSource('/train-stream');
+
+        source.addEventListener('server_stats', (event) => {
+            document.getElementById('mps-counter').innerText = event.data;
+            document.getElementById('stream-status').innerText = '🟢 Live';
+        });
+
+        source.addEventListener('trainPositionsUx', (event) => {
+            try {
+                const parsedData = JSON.parse(event.data);
+                const positions = parsedData.positions || [];
+
+                document.getElementById('train-count').innerText = positions.length;
+
+                positions.forEach(train => {
+                    // Safe ID extraction to prevent "Ghost Train" Dashcam 404s
+                    const trainId = train._id || train.id;
+                    const lat = train.lat;
+                    const lng = train.lng;
+                    const trainNum = train.trainNumber || 'Unknown';
+                    const heading = train.course || 0;
+
+                    if (lat && lng) {
+                        const speed = train.speed ? parseFloat(train.speed).toFixed(1) + ' km/h' : '0 km/h';
+                        const headingText = train.course ? Math.round(train.course) + '°' : 'N/A';
+                        const locText = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+                        const nextStop = train.next_stop || train.nextStation || train.nextStopName || train.destination || 'Not available';
+                        const trackDist = (train.alongTrackDistance !== undefined && train.alongTrackDistance !== null) ? Number(train.alongTrackDistance).toFixed(5) : 'N/A';
+                        const chainage = train.chainage_m ? `${train.chainage_m} m` : 'N/A';
+
+                        let innerContentHtml = `
+                            <div style="font-size:16px; margin-bottom: 5px; color:#d9534f;"><b>🚂 Train ${trainNum}</b></div>
+                            <table class="train-stats">
+                                <tr><td><b>ID:</b></td><td>${trainId}</td></tr>
+                                <tr><td><b>Speed:</b></td><td>${speed}</td></tr>
+                                <tr><td><b>Heading:</b></td><td>${headingText}</td></tr>
+                                <tr><td><b>Next Stop:</b></td><td>${nextStop}</td></tr>
+                                <tr><td><b>Chainage:</b></td><td>${chainage}</td></tr>
+                                <tr><td><b>Segment Pos:</b></td><td>${trackDist}</td></tr>
+                                <tr><td><b>API Coord:</b></td><td>${locText}</td></tr>
+                            </table>
+
+                            <button id="cam-btn-${trainId}" class="cam-btn" onclick="openDashcam('${trainId}', '${trainNum}')">
+                                🎥 Live Dashcam
+                            </button>
+
+                            <div class="details-box"><b>All Details:</b><br>
+                        `;
+                        for (const [key, value] of Object.entries(train)) {
+                            const valStr = typeof value === 'object' ? JSON.stringify(value) : value;
+                            innerContentHtml += `<b>${key}:</b> ${valStr}<br>`;
+                        }
+                        innerContentHtml += `</div>`;
+
+                        if (trainMarkers[trainId]) {
+                            const marker = trainMarkers[trainId];
+                            marker.setLatLng([lat, lng]);
+
+                            const iconElement = marker.getElement();
+                            if (iconElement) {
+                                const arrow = iconElement.querySelector('.train-arrow');
+                                if (arrow) arrow.style.transform = `rotate(${heading}deg)`;
+                            }
+
+                            const popup = marker.getPopup();
+                            if (popup && popup.isOpen()) {
+                                const leafletContent = popup.getElement().querySelector('.leaflet-popup-content');
+                                const mainScroll = leafletContent ? leafletContent.scrollTop : 0;
+                                const detailsBox = popup.getElement().querySelector('.details-box');
+                                const detailsScroll = detailsBox ? detailsBox.scrollTop : 0;
+
+                                const contentDiv = document.getElementById(`train-data-${trainId}`);
+                                if (contentDiv) contentDiv.innerHTML = innerContentHtml;
+
+                                setTimeout(() => {
+                                    // const newLeafletContent = popup.getElement().querySelector('.leaflet-popup-content');
+                                    if (newLeafletContent) newLeafletContent.scrollTop = mainScroll;
+                                    const newDetailsBox = popup.getElement().querySelector('.details-box');
+                                    if (newDetailsBox) newDetailsBox.scrollTop = detailsScroll;
+                                }, 0);
+                            } else {
+                                marker.setPopupContent(`<div class="info-popup" id="train-data-${trainId}">${innerContentHtml}</div>`);
+                            }
+                        } else {
+                            const trainIcon = L.divIcon({
+                                className: 'train-icon-container',
+                                html: `<div class="train-arrow" style="transform: rotate(${heading}deg);">▲</div>`,
+                                iconSize: [30, 30],
+                                iconAnchor: [15, 15]
+                            });
+                            const marker = L.marker([lat, lng], { icon: trainIcon }).addTo(map);
+                            marker.bindPopup(`<div class="info-popup" id="train-data-${trainId}">${innerContentHtml}</div>`, { maxHeight: 380, minWidth: 250 });
+                            trainMarkers[trainId] = marker;
+                        }
+                    }
+                });
+            } catch (err) {
+                console.error("Error parsing train data:", err);
+            }
+        });
+
+        source.onopen = () => {
+            console.log("SSE Connection opened.");
+            document.getElementById('stream-status').innerText = '🟢 Connected';
+        };
+        source.onerror = (err) => {
+            console.error("SSE Connection Error.", err);
+            document.getElementById('stream-status').innerText = '🔴 Offline';
+            document.getElementById('mps-counter').innerText = '0';
+            document.getElementById('train-count').innerText = '0';
+        };
+    </script>
+</body>
+</html>
