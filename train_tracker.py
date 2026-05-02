@@ -1,3 +1,203 @@
+import json
+import time
+import requests
+import threading
+import os
+import glob
+from flask import Flask, jsonify
+from flask_cors import CORS
+
+PROXY_URL = "http://127.0.0.1:5000/train-stream"
+STATE_FILE = "latest_state.json"
+
+live_db = {}
+daily_archive = {}
+current_archive_date = ""
+
+def load_live_db():
+    global live_db
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                live_db = json.load(f)
+            print(f"📁 Loaded {len(live_db)} known trains from live state.")
+        except Exception as e:
+            print(f"⚠ Could not load state DB: {e}")
+
+def save_live_db():
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(live_db, f)
+    except Exception: pass  
+
+def get_archive_filename(date_str):
+    return f"archive_{date_str}.json"
+
+def load_daily_archive(date_str):
+    filename = get_archive_filename(date_str)
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r") as f:
+                return json.load(f)
+        except Exception: pass
+    return {}
+
+def save_daily_archive():
+    if current_archive_date and daily_archive:
+        try:
+            with open(get_archive_filename(current_archive_date), "w") as f:
+                json.dump(daily_archive, f)
+        except Exception: pass
+
+def watch_stream():
+    global live_db, daily_archive, current_archive_date
+    print("📡 Tracker thread connecting to stream...")
+    
+    last_save_time = time.time()
+    
+    while True:
+        try:
+            response = requests.get(PROXY_URL, stream=True, timeout=90)
+            for line in response.iter_lines():
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith("data: "):
+                        try:
+                            payload = decoded_line[6:]
+                            data = json.loads(payload)
+                            
+                            if isinstance(data, dict) and "positions" in data:
+                                current_time = time.time()
+                                
+                                today_str = time.strftime("%Y-%m-%d", time.localtime(current_time))
+                                if today_str != current_archive_date:
+                                    if current_archive_date:  
+                                        save_daily_archive()
+                                    current_archive_date = today_str
+                                    daily_archive = load_daily_archive(today_str)
+
+                                for train in data["positions"]:
+                                    # ENFORCE LOCOMOTIVE ID AS PRIMARY KEY
+                                    loco_id = train.get("locomotiveId")
+                                    if not loco_id:
+                                        loco_id = train.get("trainId") or train.get("_id") or train.get("id")
+                                        
+                                    speed = float(train.get("speed", 0) or 0)
+                                    heading = train.get("course", 0)
+                                    lat = train.get("lat")
+                                    lng = train.get("lng")
+
+                                    # EXTRACT CLEAR IDENTITIES
+                                    loco_num = train.get("locomotiveNumber") or "Unknown Loco"
+                                    t_name = train.get("name") or train.get("trainName") or ""
+                                    t_num = train.get("trainNumber") or train.get("scheduleNumber") or ""
+                                    
+                                    if t_name and t_num and t_name != t_num:
+                                        route_name = f"{t_name} ({t_num})"
+                                    else:
+                                        route_name = t_name or t_num or "No Route Assigned"
+
+                                    if loco_id not in live_db:
+                                        live_db[loco_id] = {
+                                            "loco_num": loco_num,
+                                            "route_name": route_name,
+                                            "max_speed": speed,
+                                            "current_speed": speed,
+                                            "last_seen": current_time,
+                                            "packet_history": [],
+                                            "last_lat": lat,
+                                            "last_lng": lng,
+                                            "raw_data": train,
+                                            "last_path_time": 0
+                                        }
+
+                                    info = live_db[loco_id]
+                                    info["loco_num"] = loco_num
+                                    info["route_name"] = route_name
+                                    info["max_speed"] = max(speed, info.get("max_speed", 0))
+                                    info["current_speed"] = speed
+                                    info["last_seen"] = current_time
+                                    info["raw_data"] = train  
+                                    
+                                    info.setdefault("packet_history", []).append(current_time)
+                                    info["packet_history"] = [t for t in info["packet_history"] if current_time - t <= 60]
+
+                                    last_path_time = info.get("last_path_time", 0)
+                                    if current_time - last_path_time >= 5:
+                                        if lat != info.get("last_lat") or lng != info.get("last_lng") or (current_time - last_path_time >= 300):
+                                            
+                                            if loco_id not in daily_archive:
+                                                daily_archive[loco_id] = {
+                                                    "loco_num": loco_num,
+                                                    "route_name": route_name,
+                                                    "raw_data": train,
+                                                    "path_history": []
+                                                }
+                                                
+                                            daily_archive[loco_id]["path_history"].append({
+                                                "t": current_time,
+                                                "lat": lat,
+                                                "lng": lng,
+                                                "s": speed,
+                                                "h": heading
+                                            })
+                                            
+                                            info["last_path_time"] = current_time
+                                            info["last_lat"] = lat
+                                            info["last_lng"] = lng
+
+                                if current_time - last_save_time > 10:
+                                    save_live_db()
+                                    save_daily_archive()
+                                    last_save_time = current_time
+
+                        except json.JSONDecodeError: pass
+        except Exception as e:
+            print(f"⚠ Tracker lost connection: {e}. Retrying in 5s...")
+            time.sleep(5)
+
+load_live_db()
+threading.Thread(target=watch_stream, daemon=True).start()
+
+app = Flask(__name__)
+CORS(app)
+
+@app.route("/api/tracker")
+def get_tracker_data():
+    current_time = time.time()
+    results = []
+    for tid, info in live_db.items():
+        recent_packets = [t for t in info.get("packet_history", []) if current_time - t <= 60]
+        results.append({
+            "id": tid, 
+            "loco_num": info.get("loco_num", "Unknown Loco"),
+            "route_name": info.get("route_name", "No Route"),
+            "current_speed": info.get("current_speed", 0),
+            "max_speed": info.get("max_speed", 0),
+            "last_seen_sec": current_time - info.get("last_seen", current_time),
+            "updates_per_min": len(recent_packets),
+            "lat": info.get("last_lat"),
+            "lng": info.get("last_lng"),
+            "raw_data": info.get("raw_data", {})
+        })
+    return jsonify(results)
+
+@app.route("/api/archives/list")
+def list_archives():
+    files = glob.glob("archive_*.json")
+    dates = [f.replace("archive_", "").replace(".json", "") for f in files]
+    today = time.strftime("%Y-%m-%d")
+    if today not in dates: dates.append(today)
+    return jsonify(sorted(dates, reverse=True))
+
+@app.route("/api/archives/<date_str>")
+def get_archive(date_str):
+    if date_str == time.strftime("%Y-%m-%d"):
+        return jsonify(daily_archive)
+    return jsonify(load_daily_archive(date_str))
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=6000)
 # ================================
 # monkey patch MUST stay at top
 # ================================
