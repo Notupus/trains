@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Train Map (Hellenic Railways)</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <link rel="stylesheet" href="libs/leaflet/leaflet.css" />
+    
     <style>
         :root {
             --bg-color: #f4f4f9; --header-bg: #004d99; --header-text: white; --sidebar-bg: white; --border-color: #ccc;
@@ -54,8 +56,13 @@
         .train-item:hover { background: var(--item-hover); border-left: 4px solid var(--accent-blue); }
         .train-item-title { font-weight: bold; color: var(--accent-blue); font-size: 14px; display: block; margin-bottom: 4px; }
         .train-item-meta { font-size: 12px; color: var(--text-muted); display: block; }
+        
         .speed-badge { background-color: #d9534f; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; float: right; }
         .speed-badge.green { background-color: #28a745; }
+        
+        .time-badge { background-color: #6c757d; color: white; padding: 2px 6px; border-radius: 4px; font-weight: bold; font-size: 11px; float: right; }
+        .time-badge.recent { background-color: #28a745; }
+        .time-badge.stale { background-color: #d9534f; }
         
         #map { flex-grow: 1; height: 100%; z-index: 1; background-color: #aaa; }
         .leaflet-layer, .leaflet-control-zoom-in, .leaflet-control-zoom-out, .leaflet-control-attribution { filter: var(--map-filter); transition: 0.3s; }
@@ -76,15 +83,17 @@
         .info-popup { font-size: 13px; line-height: 1.4; max-height: 400px; overflow-y: auto; }
         .info-popup b { color: var(--accent-blue); }
         .info-popup hr { border: 0; border-top: 1px solid var(--border-color); margin: 8px 0; }
-        .details-box { background-color: var(--box-bg); border: 1px solid var(--border-color); border-radius: 4px; padding: 8px; font-size: 11px; margin-top: 10px; overflow-y: auto; max-height: 150px; color: var(--text-muted); }
+        
+        /* Specific lock for details-box scrolling */
+        .details-box { background-color: var(--box-bg); border: 1px solid var(--border-color); border-radius: 4px; padding: 8px; font-size: 11px; margin-top: 5px; overflow-y: auto; max-height: 150px; color: var(--text-muted); }
         .details-box b { color: var(--text-main); }
+        
         .train-stats { width: 100%; border-collapse: collapse; margin-top: 5px; }
         .train-stats td { padding: 3px 0; vertical-align: top; }
         .train-stats td:first-child { width: 90px; }
-        .cam-btn { display: block; width: 100%; margin-top: 10px; padding: 8px; background-color: #d9534f; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; text-align: center; transition: 0.2s; }
+        .cam-btn { display: block; width: 100%; margin-top: 10px; margin-bottom: 5px; padding: 8px; background-color: #d9534f; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; text-align: center; transition: 0.2s; }
 
-        /* Stream URL Container Styling */
-        .stream-url-container { margin-top: 8px; padding: 8px; background: var(--box-bg); border: 1px solid var(--border-color); border-radius: 4px; font-family: monospace; font-size: 11px; word-break: break-all; }
+        .stream-url-container { margin-bottom: 8px; padding: 8px; background: var(--box-bg); border: 1px solid var(--border-color); border-radius: 4px; font-family: monospace; font-size: 11px; word-break: break-all; }
         .copy-url-btn { float: right; background: var(--accent-blue); color: white; border: none; border-radius: 3px; padding: 3px 8px; cursor: pointer; font-weight: bold; font-family: sans-serif; }
         .copy-url-btn:hover { opacity: 0.8; }
 
@@ -124,7 +133,7 @@
         <div id="sidebar">
             <div class="sidebar-header">
                 <select id="sidebar-view" class="view-select" onchange="changeSidebarView(this.value)">
-                    <option value="live">📍 Live Map Trains</option>
+                    <option value="live" selected>📍 Live Map Trains</option>
                     <option value="active">🚀 Active (>1km/h)</option>
                     <option value="all">📡 All Known Trains</option>
                 </select>
@@ -145,8 +154,8 @@
         </div>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script src="libs/leaflet/leaflet.js"></script>
+    <script src="libs/hls.js"></script>
 
     <script>
         // --- 1. GLOBAL STATE ---
@@ -163,14 +172,24 @@
         const lastTrainTimestamps = {};
 
         function extractLocoId(t) { return t.locomotiveId || t.trainId || t._id || t.id; }
-        
         function extractLocoNum(t) { return t.locomotiveNumber || "Unknown Loco"; }
-        
         function extractRouteName(t) { 
             const name = t.name || t.trainName || "";
             const num = t.trainNumber || t.scheduleNumber || "";
             if (name && num && name !== num) return `${name} (${num})`;
             return name || num || 'No Route Assigned';
+        }
+
+        function getHistoryPointAtWayback(train) {
+            if (!train.path_history || train.path_history.length === 0) return null;
+            if (waybackTargetTime <= train.path_history[0].t) return train.path_history[0];
+            if (waybackTargetTime >= train.path_history[train.path_history.length - 1].t) return train.path_history[train.path_history.length - 1];
+            for (let i = 0; i < train.path_history.length - 1; i++) {
+                if (waybackTargetTime >= train.path_history[i].t && waybackTargetTime <= train.path_history[i+1].t) {
+                    return train.path_history[i];
+                }
+            }
+            return null;
         }
 
         // --- 2. UI SETUP ---
@@ -223,25 +242,19 @@
         function renderSidebar() {
             const listEl = document.getElementById('train-list');
             const countEl = document.getElementById('sidebar-count');
-            const listScroll = listEl.scrollTop;
             let dataToRender = [];
 
             if (isWaybackMode) {
                 if (currentSidebarView === 'dvr-active') {
                     dataToRender = Object.values(currentArchiveData).filter(t => {
-                        let speed = 0;
-                        for (let i = 0; i < t.path_history.length - 1; i++) {
-                            if (waybackTargetTime >= t.path_history[i].t && waybackTargetTime <= t.path_history[i+1].t) {
-                                speed = t.path_history[i].s; break;
-                            }
-                        }
-                        return speed > 1.0;
+                        const pt = getHistoryPointAtWayback(t);
+                        return pt && pt.s > 1.0;
                     });
                 } else { dataToRender = Object.values(currentArchiveData); }
             } else {
                 if (currentSidebarView === 'live') dataToRender = latestLiveData;
                 else if (currentSidebarView === 'active') dataToRender = latestTrackerData.filter(t => t.current_speed > 1.0);
-                else dataToRender = latestTrackerData;
+                else dataToRender = latestTrackerData; // 'all'
             }
 
             countEl.innerText = dataToRender.length;
@@ -257,11 +270,34 @@
                 
                 const locoNum = train.loco_num || extractLocoNum(raw);
                 const routeName = train.route_name || extractRouteName(raw);
-                const speedVal = train.current_speed !== undefined ? train.current_speed : (train.speed !== undefined ? train.speed : 0);
-                const speed = parseFloat(speedVal).toFixed(1);
                 
-                const dot = speedVal > 1.0 ? '🟢' : (isWaybackMode ? '📡' : '🟡');
-                const speedClass = speedVal > 1.0 ? 'speed-badge green' : 'speed-badge';
+                let speedVal = 0;
+                let badgeHtml = '';
+
+                if (currentSidebarView === 'all') {
+                    const lastSeenSec = train.last_seen_sec !== undefined ? train.last_seen_sec : 0;
+                    const timeClass = lastSeenSec > 120 ? 'time-badge stale' : 'time-badge recent';
+                    const timeAgo = formatTimeAgo(lastSeenSec);
+                    const absoluteTime = new Date(Date.now() - (lastSeenSec * 1000));
+                    const timeStr = absoluteTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                    badgeHtml = `<span class="${timeClass}">Seen: ${timeStr} (${timeAgo})</span>`;
+                    speedVal = train.current_speed || 0; 
+                } else {
+                    if (isWaybackMode) {
+                        const pt = getHistoryPointAtWayback(train);
+                        if (pt) speedVal = pt.s;
+                    } else {
+                        speedVal = train.current_speed !== undefined ? train.current_speed : (train.speed !== undefined ? train.speed : 0);
+                    }
+                    const speed = parseFloat(speedVal).toFixed(1);
+                    const speedClass = speedVal > 1.0 ? 'speed-badge green' : 'speed-badge';
+                    badgeHtml = `<span class="${speedClass}">${speed} km/h</span>`;
+                }
+
+                let dot = '🟡';
+                if (isWaybackMode) dot = '📡';
+                else if (currentSidebarView === 'all' && train.last_seen_sec > 120) dot = '🔴';
+                else if (speedVal > 1.0) dot = '🟢';
 
                 const schedId = raw.trainId || raw.scheduleId;
                 let idMeta = `Loco: ${locoId}`;
@@ -270,7 +306,7 @@
                 }
 
                 const content = `
-                    <span class="train-item-title">${dot} Loco: ${locoNum} <span class="${speedClass}">${speed} km/h</span></span>
+                    <span class="train-item-title">${dot} Loco: ${locoNum} ${badgeHtml}</span>
                     <span class="train-item-meta">Route: ${routeName}</span>
                     <span class="train-item-meta" style="font-size:10px; margin-top:4px; font-family:monospace;">${idMeta}</span>
                 `;
@@ -325,26 +361,11 @@
 
             let lostSignalRow = (mode === 'ghost' && lastSeenSec > 120) ? `<tr><td><b>Lost Signal:</b></td><td style="color:#d9534f; font-weight:bold;">${new Date(Date.now() - (lastSeenSec * 1000)).toLocaleTimeString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td></tr>` : '';
 
-            // Inject the Stream-Info container which will be populated dynamically on click
-            let innerContentHtml = `
-                <div style="font-size:16px; margin-bottom: 5px; color:${markerColor};"><b>🚂 Loco: ${locoNum}</b></div>
-                <div style="font-size:14px; margin-bottom: 5px;"><b>Route:</b> ${routeName}</div>
-                <div style="margin-bottom: 8px;">${statusText}</div>
-                <table class="train-stats">
-                    <tr><td><b>Loco ID:</b></td><td>${locoId}</td></tr>
-                    <tr><td><b>Speed:</b></td><td><span id="pop-speed-${locoId}">${speedText}</span></td></tr>
-                    <tr><td><b>Heading:</b></td><td>${headingText}</td></tr>
-                    <tr><td><b>Next Stop:</b></td><td>${nextStop}</td></tr>
-                    ${lostSignalRow}
-                </table>
-                <button id="cam-btn-${locoId}" class="cam-btn" style="background-color:${markerColor};" onclick="openDashcam('${locoId}', '${trainId}', '${locoNum}')">🎥 Live Dashcam</button>
-                <div id="stream-info-${locoId}" class="stream-url-container" style="display:none;"></div>
-                <div class="details-box"><b>All Details:</b><br>
-            `;
+            // Extract the raw JSON dump to a variable so we can inject it easily
+            let detailsHtml = '';
             for (const [key, value] of Object.entries(trainData)) {
-                if(key !== "path_history") innerContentHtml += `<b>${key}:</b> ${typeof value === 'object' ? JSON.stringify(value) : value}<br>`;
+                if(key !== "path_history") detailsHtml += `<b>${key}:</b> ${typeof value === 'object' ? JSON.stringify(value) : value}<br>`;
             }
-            innerContentHtml += `</div>`;
 
             if (trainMarkers[locoId]) {
                 const m = trainMarkers[locoId];
@@ -355,20 +376,62 @@
                     arrow.style.transform = `rotate(${heading}deg)`;
                     arrow.style.backgroundColor = markerColor; 
                 }
+                
                 if (m.getPopup() && m.getPopup().isOpen()) {
-                    const el = document.getElementById('pop-speed-' + locoId);
-                    if (el) el.innerText = speedText;
+                    // Surgical DOM Injection: Update numbers but preserve scroll
+                    const elSpeed = document.getElementById('pop-speed-' + locoId);
+                    if (elSpeed) elSpeed.innerText = speedText;
+                    
+                    const elHeading = document.getElementById('pop-heading-' + locoId);
+                    if (elHeading) elHeading.innerText = headingText;
+                    
+                    const elNextStop = document.getElementById('pop-nextstop-' + locoId);
+                    if (elNextStop) elNextStop.innerText = nextStop;
+
+                    const elStatus = document.getElementById('pop-status-' + locoId);
+                    if (elStatus) elStatus.innerHTML = statusText;
+
+                    const elLost = document.getElementById('pop-lost-' + locoId);
+                    if (elLost) elLost.innerHTML = lostSignalRow ? `<table class="train-stats">${lostSignalRow}</table>` : '';
+
+                    const elCamBtn = document.getElementById('cam-btn-' + locoId);
+                    if (elCamBtn) elCamBtn.style.backgroundColor = markerColor;
+
+                    const elDetails = document.getElementById('pop-details-' + locoId);
+                    if (elDetails) {
+                        const scroll = elDetails.scrollTop; // Save user's scroll state
+                        elDetails.innerHTML = detailsHtml;
+                        elDetails.scrollTop = scroll;       // Restore immediately
+                    }
                 }
             } else {
+                let innerContentHtml = `
+                    <div style="font-size:16px; margin-bottom: 5px; color:${markerColor};"><b>🚂 Loco: ${locoNum}</b></div>
+                    <div style="font-size:14px; margin-bottom: 5px;"><b>Route:</b> ${routeName}</div>
+                    <div id="pop-status-${locoId}" style="margin-bottom: 8px;">${statusText}</div>
+                    <table class="train-stats">
+                        <tr><td><b>Loco ID:</b></td><td>${locoId}</td></tr>
+                        <tr><td><b>Speed:</b></td><td><span id="pop-speed-${locoId}">${speedText}</span></td></tr>
+                        <tr><td><b>Heading:</b></td><td><span id="pop-heading-${locoId}">${headingText}</span></td></tr>
+                        <tr><td><b>Next Stop:</b></td><td><span id="pop-nextstop-${locoId}">${nextStop}</span></td></tr>
+                    </table>
+                    <div id="pop-lost-${locoId}">${lostSignalRow ? `<table class="train-stats">${lostSignalRow}</table>` : ''}</div>
+                    <button id="cam-btn-${locoId}" class="cam-btn" style="background-color:${markerColor};" onclick="openDashcam('${locoId}', '${trainId}', '${locoNum}')">🎥 Live Dashcam</button>
+                    <div id="stream-info-${locoId}" class="stream-url-container" style="display:none;"></div>
+                    <div style="margin-top:5px;"><b>All Details:</b></div>
+                    <div id="pop-details-${locoId}" class="details-box">${detailsHtml}</div>
+                `;
+
                 const icon = L.divIcon({
                     className: 'train-icon-container',
                     html: `<div class="train-arrow" style="transform: rotate(${heading}deg); background-color:${markerColor}">▲</div>`,
                     iconSize: [30, 30], iconAnchor: [15, 15]
                 });
                 const m = L.marker([lat, lng], { icon }).addTo(map);
+                
+                // Keep autoPan disabled so camera doesn't jump
                 m.bindPopup(`<div class="info-popup" id="train-data-${locoId}">${innerContentHtml}</div>`, { maxHeight: 380, minWidth: 250, autoPan: false });
                 
-                // EVENT LISTENER: Fetch stream URL specifically when the user clicks the marker
                 m.on('popupopen', () => {
                     if (isWaybackMode) return;
                     const container = document.getElementById(`stream-info-${locoId}`);
@@ -383,8 +446,8 @@
                             const url = data.hls?.playlistUrl;
                             if (url) {
                                 container.innerHTML = `
-                                    <button class="copy-url-btn" onclick="navigator.clipboard.writeText('${url}').then(()=>this.innerText='Copied!')">📋 Copy URL</button>
-                                    <b>HLS Stream:</b><br><span style="user-select:all; color: var(--text-muted);">${url}</span>
+                                    <button class="copy-url-btn" onclick="navigator.clipboard.writeText('${url}').then(()=>this.innerText='Copied!')">📋 Copy</button>
+                                    <b>HLS Stream URL:</b><br><span style="user-select:all; color: var(--text-muted);">${url}</span>
                                     <div style="clear:both;"></div>
                                 `;
                             } else {
@@ -512,6 +575,10 @@
                 isWaybackMode = true;
                 document.getElementById('map-mode-indicator').innerText = "DVR MODE";
                 document.getElementById('map-mode-indicator').style.color = "#ff9800";
+                
+                // Clear map before redrawing
+                for (let id in trainMarkers) { map.removeLayer(trainMarkers[id]); delete trainMarkers[id]; }
+
                 document.getElementById('sidebar-view').innerHTML = `
                     <option value="dvr-all">📡 DVR: All Trains</option>
                     <option value="dvr-active">🚀 DVR: Moving Only</option>
@@ -552,18 +619,7 @@
             Object.values(currentArchiveData).forEach(t => {
                 if (!t.path_history.length) return;
                 
-                let bestP = null;
-                if (waybackTargetTime <= t.path_history[0].t) {
-                    bestP = t.path_history[0];
-                } else if (waybackTargetTime >= t.path_history[t.path_history.length - 1].t) {
-                    bestP = t.path_history[t.path_history.length - 1];
-                } else {
-                    for (let i = 0; i < t.path_history.length - 1; i++) {
-                        if (waybackTargetTime >= t.path_history[i].t && waybackTargetTime <= t.path_history[i+1].t) {
-                            bestP = t.path_history[i]; break;
-                        }
-                    }
-                }
+                const bestP = getHistoryPointAtWayback(t);
                 
                 if (bestP && t.raw_data) {
                     const fake = {...t.raw_data, lat: bestP.lat, lng: bestP.lng, speed: bestP.s, course: bestP.h};
@@ -576,7 +632,14 @@
             });
         }
 
-        window.goLive = () => location.reload();
+        window.goLive = function() {
+            document.getElementById('sidebar-view').innerHTML = `
+                <option value="live" selected>📍 Live Map Trains</option>
+                <option value="active">🚀 Active (>1km/h)</option>
+                <option value="all">📡 All Known Trains</option>
+            `;
+            location.reload(); 
+        };
 
         // --- 7. DASHCAM ---
         window.openDashcam = function(locoId, trainId, locoNum) {
